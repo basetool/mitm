@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"ss-go/gowinder/mylog"
 )
 
 const (
@@ -44,10 +45,13 @@ func InitConfig(conf *config.Cfg, tlsconfig *config.TLSConfig) *HandlerWrapper {
 		tlsConfig:    tlsconfig,
 		dynamicCerts: NewCache(),
 	}
+	
+
 	err := handler.GenerateCertForClient()
 	if err != nil {
 		return nil
 	}
+	mylog.Info("InitConfig", "https daili on", handler)
 	return handler
 }
 
@@ -55,9 +59,11 @@ func InitConfig(conf *config.Cfg, tlsconfig *config.TLSConfig) *HandlerWrapper {
 func (handler *HandlerWrapper) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	if req.Method == "CONNECT" {
 		handler.https = true
+		mylog.Info("CONNECT", "https ")
 		handler.InterceptHTTPS(resp, req)
 	} else {
 		handler.https = false
+		mylog.Info("CONNECT", "by http ")
 		handler.DumpHTTPAndHTTPS(resp, req)
 	}
 }
@@ -77,7 +83,7 @@ func (handler *HandlerWrapper) DumpHTTPAndHTTPS(resp http.ResponseWriter, req *h
 
 	connHj, _, err := resp.(http.Hijacker).Hijack()
 	if err != nil {
-		logger.Println("Hijack fail to take over the TCP connection from client's request")
+		mylog.Info("Hijack fail to take over the TCP connection from client's request")
 	}
 	defer connHj.Close()
 
@@ -92,7 +98,7 @@ func (handler *HandlerWrapper) DumpHTTPAndHTTPS(resp http.ResponseWriter, req *h
 		}
 		connOut, err = net.DialTimeout("tcp", host, time.Second*30)
 		if err != nil {
-			logger.Println("Dial to", host, "error:", err)
+			mylog.Info("Dial to", host, "error:", err)
 			return
 		}
 	} else {
@@ -101,7 +107,7 @@ func (handler *HandlerWrapper) DumpHTTPAndHTTPS(resp http.ResponseWriter, req *h
 		}
 		connOut, err = tls.Dial("tcp", host, handler.tlsConfig.ServerTLSConfig)
 		if err != nil {
-			logger.Println("Dial to", host, "error:", err)
+			mylog.Info("Dial to", host, "error:", err)
 			return
 		}
 	}
@@ -117,23 +123,23 @@ func (handler *HandlerWrapper) DumpHTTPAndHTTPS(resp http.ResponseWriter, req *h
 		Body
 	*/
 	if err = req.Write(connOut); err != nil {
-		logger.Println("send to server error", err)
+		mylog.Info("send to server error", err)
 		return
 	}
 
 	respFromRemote, err := http.ReadResponse(bufio.NewReader(connOut), req)
 	if err != nil && err != io.EOF {
-		logger.Println("Fail to read response from remote server.", err)
+		mylog.Info("Fail to read response from remote server.", err)
 	}
 
 	respDump, err := httputil.DumpResponse(respFromRemote, true)
 	if err != nil {
-		logger.Println("Fail to dump the response.", err)
+		mylog.Info("Fail to dump the response.", err)
 	}
 	// Send remote response back to client
 	_, err = connHj.Write(respDump)
 	if err != nil {
-		logger.Println("Fail to send response back to client.", err)
+		mylog.Info("Fail to send response back to client.", err)
 	}
 
 	<-ch
@@ -149,22 +155,27 @@ func (handler *HandlerWrapper) InterceptHTTPS(resp http.ResponseWriter, req *htt
 	addr := req.Host
 	host := strings.Split(addr, ":")[0]
 
+  // step 1, 为每个域名签发证书
+
 	cert, err := handler.FakeCertForName(host)
 	if err != nil {
-		logger.Println("Could not get mitm cert for name: %s\nerror: %s", host, err)
+		mylog.Info("Could not get mitm cert for name: %s\nerror: %s", host, err)
 		respBadGateway(resp)
 		return
 	}
 
+  // step 2，拿到原始 TCP 连接	
+
 	connIn, _, err := resp.(http.Hijacker).Hijack()
 	if err != nil {
-		logger.Println("Unable to access underlying connection from client: %s", err)
+		mylog.Info("Unable to access underlying connection from client: %s", err)
 		respBadGateway(resp)
 		return
 	}
 
 	tlsConfig := copyTlsConfig(handler.tlsConfig.ServerTLSConfig)
 	tlsConfig.Certificates = []tls.Certificate{*cert}
+	// step 3，将 TCP 连接转化为 TLS 连接
 	tlsConnIn := tls.Server(connIn, tlsConfig)
 	listener := &mitmListener{tlsConnIn}
 	httpshandler := http.HandlerFunc(func(resp2 http.ResponseWriter, req2 *http.Request) {
@@ -174,6 +185,7 @@ func (handler *HandlerWrapper) InterceptHTTPS(resp http.ResponseWriter, req *htt
 	})
 
 	go func() {
+	 // step 4，启动一个伪装的 TLS 服务器	
 		err = http.Serve(listener, httpshandler)
 		if err != nil && err != io.EOF {
 			logger.Printf("Error serving mitm'ed connection: %s", err)
