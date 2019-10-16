@@ -160,7 +160,7 @@ func (key *PrivateKey) TLSCertificateFor(
 		},
 		NotBefore: time.Now().AddDate(0, -1, 0),
 		NotAfter:  validUntil,
-
+        DNSNames:  []string{name},
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 	}
